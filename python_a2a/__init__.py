@@ -37,7 +37,13 @@ from .models.content import (
     ErrorContent,
     Metadata,
 )
-from .models.agent import AgentCard, AgentSkill
+from .models.agent import (
+    AgentCard,
+    AgentSkill,
+    OAuthFlow,
+    OAuthFlows,
+    SecurityScheme,
+)
 from .models.task import Task, TaskStatus, TaskState
 
 # Core client functionality

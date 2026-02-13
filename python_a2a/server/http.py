@@ -15,6 +15,10 @@ try:
 except ImportError:
     Flask = None
 
+from ..auth.verifiers import (
+    InsufficientScopeError,
+    MultiProtocolAuthBackend,
+)
 from ..models.message import Message, MessageRole
 from ..models.conversation import Conversation
 from ..models.content import TextContent, ErrorContent
@@ -23,12 +27,18 @@ from ..exceptions import A2AImportError, A2ARequestError, A2AStreamingError
 from .ui_templates import AGENT_INDEX_HTML, JSON_HTML_TEMPLATE
 
 
-def create_flask_app(agent: BaseA2AServer) -> Flask:
+def create_flask_app(
+    agent: BaseA2AServer,
+    auth_backend: Optional[MultiProtocolAuthBackend] = None,
+) -> Flask:
     """
     Create a Flask application that serves an A2A agent
     
     Args:
         agent: The A2A agent server
+        auth_backend: Optional multi-protocol auth backend for request verification.
+            When provided, a ``before_request`` hook is registered that verifies
+            credentials and returns 401/403 on failure.
         
     Returns:
         A Flask application
@@ -57,7 +67,48 @@ def create_flask_app(agent: BaseA2AServer) -> Flask:
     @app.route('/<path:path>', methods=['OPTIONS'])
     def options_handler(path=None):
         return '', 200
-    
+
+    # Auth verification hook (only when auth_backend is provided)
+    if auth_backend is not None:
+        @app.before_request
+        def _verify_auth():
+            """Verify request credentials via the multi-protocol auth backend."""
+            if request.method == "OPTIONS":
+                return None
+
+            req_headers = dict(request.headers)
+            req_path = request.path
+
+            try:
+                principal = auth_backend.verify(
+                    headers=req_headers,
+                    path=req_path,
+                )
+            except InsufficientScopeError as exc:
+                # 403 Forbidden — credentials valid but insufficient scope
+                challenge = auth_backend.get_www_authenticate()
+                missing = sorted(set(exc.required) - exc.granted)
+                scope_str = " ".join(missing)
+                www_auth = f'{challenge}, Bearer error="insufficient_scope", scope="{scope_str}"'
+                return (
+                    jsonify({"error": "insufficient_scope", "required_scopes": exc.required}),
+                    403,
+                    {"WWW-Authenticate": www_auth},
+                )
+
+            if principal is None:
+                # 401 Unauthorized — no verifier matched
+                www_auth = auth_backend.get_www_authenticate()
+                return (
+                    jsonify({"error": "unauthorized"}),
+                    401,
+                    {"WWW-Authenticate": www_auth},
+                )
+
+            # Store principal on request for downstream handlers
+            request.auth_principal = principal
+            return None
+
     # Define a function to render beautiful HTML UI
     def get_agent_data():
         """Get basic agent data for rendering"""

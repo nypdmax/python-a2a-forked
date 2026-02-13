@@ -22,7 +22,13 @@ from .conversation import Conversation
 
 # Import newer models with defensive imports
 try:
-    from .agent import AgentCard, AgentSkill
+    from .agent import (
+        AgentCard,
+        AgentSkill,
+        OAuthFlow,
+        OAuthFlows,
+        SecurityScheme,
+    )
 except ImportError:
     # These may not be available yet
     pass
@@ -52,7 +58,13 @@ __all__ = [
 try:
     AgentCard
     AgentSkill
-    __all__.extend(['AgentCard', 'AgentSkill'])
+    OAuthFlow
+    OAuthFlows
+    SecurityScheme
+    __all__.extend([
+        'AgentCard', 'AgentSkill',
+        'OAuthFlow', 'OAuthFlows', 'SecurityScheme',
+    ])
 except NameError:
     pass
 

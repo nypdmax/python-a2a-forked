@@ -19,6 +19,7 @@ from ..models.content import (
 from ..models.agent import AgentCard, AgentSkill
 from ..models.task import Task, TaskStatus, TaskState
 from .base import BaseA2AClient
+from ..auth.provider import UnifiedAuthProvider
 from ..exceptions import A2AConnectionError, A2AResponseError, A2AStreamingError
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,8 @@ class A2AClient(BaseA2AClient):
     """Client for interacting with HTTP-based A2A-compatible agents"""
     
     def __init__(self, endpoint_url: str, headers: Optional[Dict[str, str]] = None, 
-                 timeout: int = 30, google_a2a_compatible: bool = False):
+                 timeout: int = 30, google_a2a_compatible: bool = False,
+                 auth_provider: Optional[UnifiedAuthProvider] = None):
         """
         Initialize a client with an agent endpoint URL
         
@@ -37,12 +39,14 @@ class A2AClient(BaseA2AClient):
             headers: Optional HTTP headers to include in requests
             timeout: Request timeout in seconds
             google_a2a_compatible: Whether to use Google A2A format by default (not normally needed)
+            auth_provider: Optional unified auth provider for automatic credential injection
         """
         self.endpoint_url = endpoint_url.rstrip("/")
         self.headers = headers or {}
         self.timeout = timeout
         self._use_google_a2a = google_a2a_compatible
         self._protocol_detected = google_a2a_compatible  # True after we've detected the protocol type
+        self._auth_provider = auth_provider
         
         # Always include content type for JSON
         if "Content-Type" not in self.headers:
@@ -78,6 +82,63 @@ class A2AClient(BaseA2AClient):
             The agent card for the connected agent
         """
         return self.agent_card
+
+    def _get_merged_headers(self) -> Dict[str, str]:
+        """Build request headers merging base headers with auth provider.
+
+        Auth provider headers are injected first, then user-supplied
+        ``self.headers`` are applied on top (user headers take precedence).
+        """
+        if self._auth_provider is None:
+            return dict(self.headers)
+        auth_headers = self._auth_provider.get_auth_headers()
+        merged = {**auth_headers, **self.headers}
+        return merged
+
+    def _post_with_auth_retry(
+        self,
+        url: str,
+        json_data: Any,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> requests.Response:
+        """POST with automatic 401 refresh-and-retry (once).
+
+        Args:
+            url: Target URL.
+            json_data: JSON-serializable request body.
+            extra_headers: Additional headers merged on top.
+
+        Returns:
+            The ``requests.Response`` (may be a retried one).
+        """
+        headers = self._get_merged_headers()
+        if extra_headers:
+            headers.update(extra_headers)
+
+        response = requests.post(
+            url, json=json_data, headers=headers, timeout=self.timeout,
+        )
+
+        if (
+            response.status_code == 401
+            and self._auth_provider is not None
+            and self._auth_provider.should_retry_on_401(
+                response.headers.get("WWW-Authenticate")
+            )
+        ):
+            logger.debug("Received 401, attempting credential refresh and retry")
+            refreshed_headers = self._auth_provider.force_refresh()
+            retry_headers = {**refreshed_headers, **self.headers}
+            if extra_headers:
+                retry_headers.update(extra_headers)
+            response = requests.post(
+                url, json=json_data, headers=retry_headers, timeout=self.timeout,
+            )
+
+        if response.status_code not in (401, 403) and self._auth_provider is not None:
+            self._auth_provider.reset_retry()
+
+        return response
     
     def _extract_json_from_html(self, html_content: str) -> Dict[str, Any]:
         """Extract JSON data from HTML content, typically when agent card is rendered as HTML"""
@@ -782,12 +843,7 @@ class A2AClient(BaseA2AClient):
         last_error = None
         for endpoint in task_endpoints:
             try:
-                response = requests.post(
-                    endpoint,
-                    json=request_data,
-                    headers=self.headers,
-                    timeout=self.timeout
-                )
+                response = self._post_with_auth_retry(endpoint, request_data)
                 response.raise_for_status()
                 
                 # Check for content type and parse response

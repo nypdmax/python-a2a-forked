@@ -14,6 +14,7 @@ from typing import Dict, List, Any, Optional, Union, AsyncGenerator, Callable, T
 
 from .base import BaseA2AClient
 from .http import A2AClient
+from ..auth.provider import UnifiedAuthProvider
 from ..models import Message, TextContent, MessageRole
 from ..models import Task, TaskStatus, TaskState
 from ..models import Conversation
@@ -107,7 +108,11 @@ class StreamingClient(BaseA2AClient):
     """
 
     def __init__(
-        self, url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30
+        self,
+        url: str,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: int = 30,
+        auth_provider: Optional[UnifiedAuthProvider] = None,
     ):
         """
         Initialize a streaming client.
@@ -116,10 +121,12 @@ class StreamingClient(BaseA2AClient):
             url: Base URL of the A2A agent
             headers: Optional HTTP headers to include in requests
             timeout: Request timeout in seconds
+            auth_provider: Optional unified auth provider for automatic credential injection
         """
         self.url = url.rstrip("/")
         self.headers = headers or {}
         self.timeout = timeout
+        self._auth_provider = auth_provider
 
         # Ensure content type is set for JSON
         if "Content-Type" not in self.headers:
@@ -233,6 +240,14 @@ class StreamingClient(BaseA2AClient):
             self._supports_streaming = False
 
         return self._supports_streaming
+
+    async def _get_merged_headers_async(self) -> Dict[str, str]:
+        """Build request headers merging base headers with auth provider (async)."""
+        if self._auth_provider is None:
+            return dict(self.headers)
+        auth_headers = await self._auth_provider.get_auth_headers_async()
+        merged = {**auth_headers, **self.headers}
+        return merged
 
     def _create_session(self):
         """Create an aiohttp session."""
@@ -348,9 +363,36 @@ class StreamingClient(BaseA2AClient):
                 return Message.from_dict(response.json())
 
             # Asynchronous request with aiohttp
+            request_headers = await self._get_merged_headers_async()
             async with self._create_session() as session:
-                async with session.post(self.url, json=message.to_dict()) as response:
-                    # Handle HTTP errors
+                async with session.post(
+                    self.url, json=message.to_dict(), headers=request_headers,
+                ) as response:
+                    # Handle 401 with auth retry
+                    if (
+                        response.status == 401
+                        and self._auth_provider is not None
+                        and self._auth_provider.should_retry_on_401(
+                            response.headers.get("WWW-Authenticate")
+                        )
+                    ):
+                        logger.debug("Received 401, attempting async credential refresh")
+                        refreshed_headers = await self._auth_provider.force_refresh_async()
+                        retry_headers = {**refreshed_headers, **self.headers}
+                        async with session.post(
+                            self.url, json=message.to_dict(), headers=retry_headers,
+                        ) as retry_response:
+                            if retry_response.status >= 400:
+                                error_text = await retry_response.text()
+                                raise A2AConnectionError(
+                                    f"HTTP error {retry_response.status}: {error_text}"
+                                )
+                            data = await retry_response.json()
+                            if self._auth_provider is not None:
+                                self._auth_provider.reset_retry()
+                            return Message.from_dict(data)
+
+                    # Handle other HTTP errors
                     if response.status >= 400:
                         error_text = await response.text()
                         raise A2AConnectionError(
@@ -360,6 +402,8 @@ class StreamingClient(BaseA2AClient):
                     # Parse the response
                     try:
                         data = await response.json()
+                        if self._auth_provider is not None:
+                            self._auth_provider.reset_retry()
                         return Message.from_dict(data)
                     except ValueError as e:
                         raise A2AResponseError(f"Invalid response from agent: {str(e)}")
