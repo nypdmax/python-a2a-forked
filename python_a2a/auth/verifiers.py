@@ -137,7 +137,11 @@ class JWTTokenVerifier(CredentialVerifier):
             return None
 
         parts = auth_header.split(None, 1)
-        if len(parts) != 2 or parts[0].lower() != "bearer":
+        if len(parts) != 2:
+            return None
+
+        scheme = parts[0].lower()
+        if scheme not in ("bearer", "dpop"):
             return None
 
         token = parts[1]
@@ -196,10 +200,23 @@ class JWTTokenVerifier(CredentialVerifier):
 class ApiKeyVerifier(CredentialVerifier):
     """Verify API key passed in a request header.
 
+    Checks the dedicated header (default ``X-API-Key``) first.  When
+    ``bearer_fallback`` is enabled and the dedicated header is absent,
+    the verifier also accepts ``Authorization: Bearer <key>`` as an API
+    key, aligning with MCP ``APIKeyVerifier`` semantics.
+
+    When using ``bearer_fallback`` together with ``JWTTokenVerifier`` in
+    a ``MultiProtocolAuthBackend``, place ``JWTTokenVerifier`` **before**
+    this verifier so that real JWT tokens are handled by the correct
+    verifier first.
+
     Args:
         valid_keys: Set of accepted API key strings.
         header_name: Header to read (default ``X-API-Key``).
         scopes: Scopes to grant when API key is valid (default all).
+        bearer_fallback: If ``True``, fall back to reading
+            ``Authorization: Bearer <value>`` when the dedicated header
+            is absent.
     """
 
     def __init__(
@@ -207,18 +224,20 @@ class ApiKeyVerifier(CredentialVerifier):
         valid_keys: Set[str],
         header_name: str = "X-API-Key",
         scopes: Optional[Set[str]] = None,
+        bearer_fallback: bool = False,
     ) -> None:
         self._valid_keys = valid_keys
         self._header_name = header_name
         self._scopes = scopes or set()
+        self._bearer_fallback = bearer_fallback
 
     def verify(self, headers: Dict[str, str]) -> Optional[AccessPrincipal]:
-        # Case-insensitive header lookup
-        key_value = None
-        for name, value in headers.items():
-            if name.lower() == self._header_name.lower():
-                key_value = value
-                break
+        key_value = self._extract_from_dedicated_header(headers)
+        source = self._header_name
+
+        if key_value is None and self._bearer_fallback:
+            key_value = self._extract_from_bearer(headers)
+            source = "Authorization"
 
         if key_value is None:
             return None
@@ -229,11 +248,29 @@ class ApiKeyVerifier(CredentialVerifier):
         return AccessPrincipal(
             subject=f"apikey:{key_value[:8]}...",
             scopes=set(self._scopes),
-            claims={"api_key_header": self._header_name},
+            claims={"api_key_header": source},
         )
 
     def get_challenge(self) -> Optional[str]:
-        # API keys don't participate in WWW-Authenticate
+        return None
+
+    def _extract_from_dedicated_header(
+        self, headers: Dict[str, str],
+    ) -> Optional[str]:
+        target = self._header_name.lower()
+        for name, value in headers.items():
+            if name.lower() == target:
+                return value
+        return None
+
+    @staticmethod
+    def _extract_from_bearer(headers: Dict[str, str]) -> Optional[str]:
+        auth = headers.get("Authorization") or headers.get("authorization")
+        if not auth:
+            return None
+        parts = auth.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            return parts[1]
         return None
 
 

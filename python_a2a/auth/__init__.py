@@ -25,6 +25,15 @@ from .resolver import (
     SchemeEntry,
     SecurityRequirement,
 )
+from .dpop import DPoPKeyPair, DPoPProofGenerator, compute_jwk_thumbprint
+from .dpop_verifier import (
+    DPoPProofInfo,
+    DPoPProofVerifier,
+    DPoPVerificationError,
+    InMemoryJTIReplayStore,
+    extract_dpop_proof,
+)
+from .protocols.apikey import ApiKeyProtocol
 from .provider import UnifiedAuthProvider
 from .verifiers import (
     AccessPrincipal,
@@ -48,6 +57,15 @@ __all__ = [
     "AgentCardSecurityResolver",
     "SchemeEntry",
     "SecurityRequirement",
+    "ApiKeyProtocol",
+    "DPoPKeyPair",
+    "DPoPProofGenerator",
+    "DPoPProofInfo",
+    "DPoPProofVerifier",
+    "DPoPVerificationError",
+    "InMemoryJTIReplayStore",
+    "compute_jwk_thumbprint",
+    "extract_dpop_proof",
     "UnifiedAuthProvider",
     "AccessPrincipal",
     "ApiKeyVerifier",

@@ -83,15 +83,20 @@ class A2AClient(BaseA2AClient):
         """
         return self.agent_card
 
-    def _get_merged_headers(self) -> Dict[str, str]:
+    def _get_merged_headers(
+        self,
+        method: Optional[str] = None,
+        url: Optional[str] = None,
+    ) -> Dict[str, str]:
         """Build request headers merging base headers with auth provider.
 
         Auth provider headers are injected first, then user-supplied
         ``self.headers`` are applied on top (user headers take precedence).
+        ``method`` and ``url`` are forwarded to the auth provider for DPoP.
         """
         if self._auth_provider is None:
             return dict(self.headers)
-        auth_headers = self._auth_provider.get_auth_headers()
+        auth_headers = self._auth_provider.get_auth_headers(method=method, url=url)
         merged = {**auth_headers, **self.headers}
         return merged
 
@@ -111,7 +116,7 @@ class A2AClient(BaseA2AClient):
         Returns:
             The ``requests.Response`` (may be a retried one).
         """
-        headers = self._get_merged_headers()
+        headers = self._get_merged_headers(method="POST", url=url)
         if extra_headers:
             headers.update(extra_headers)
 
@@ -127,7 +132,9 @@ class A2AClient(BaseA2AClient):
             )
         ):
             logger.debug("Received 401, attempting credential refresh and retry")
-            refreshed_headers = self._auth_provider.force_refresh()
+            refreshed_headers = self._auth_provider.force_refresh(
+                method="POST", url=url,
+            )
             retry_headers = {**refreshed_headers, **self.headers}
             if extra_headers:
                 retry_headers.update(extra_headers)
