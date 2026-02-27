@@ -8,7 +8,7 @@ authentication context (``AuthContext``).
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..models.agent import SecurityScheme
 
@@ -36,6 +36,7 @@ class OAuthCredentials(AuthCredentials):
 
     access_token: str = ""
     token_type: str = "Bearer"
+    cnf: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -65,6 +66,17 @@ class AuthContext:
 
     Bundles everything a protocol plugin needs to obtain or refresh
     credentials for a specific agent endpoint.
+
+    Authorization-code fields (read from ``local_config`` or set directly):
+        grant_type: ``"client_credentials"`` (default) or ``"authorization_code"``.
+        redirect_uri: Callback URI for the authorization code flow.
+        redirect_handler: Opens the authorization URL (browser redirect).
+        callback_handler: Returns ``(code, state)`` from the callback.
+
+    DPoP fields:
+        dpop_enabled: Whether to generate DPoP proofs (default ``False``).
+        dpop_algorithm: Signing algorithm (``"ES256"`` or ``"RS256"``).
+        dpop_rsa_key_size: RSA key size when ``dpop_algorithm`` is ``"RS256"``.
     """
 
     agent_url: str
@@ -72,6 +84,15 @@ class AuthContext:
     required_scopes: List[str] = field(default_factory=list)
     local_config: Dict[str, Any] = field(default_factory=dict)
     current_credentials: Optional[AuthCredentials] = None
+
+    grant_type: str = "client_credentials"
+    redirect_uri: Optional[str] = None
+    redirect_handler: Optional[Callable[[str], None]] = None
+    callback_handler: Optional[Callable[[], Tuple[str, str]]] = None
+
+    dpop_enabled: bool = False
+    dpop_algorithm: str = "ES256"
+    dpop_rsa_key_size: int = 2048
 
 
 # ---------------------------------------------------------------------------

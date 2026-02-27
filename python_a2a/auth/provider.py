@@ -8,10 +8,10 @@ protocol subsystem.  It:
 - Generates per-request auth headers from the selected requirement.
 - Handles 401 refresh-and-retry logic (one retry).
 - Leaves 403 (insufficient_scope) to the caller.
+- Optionally injects DPoP proofs when ``dpop_enabled`` is set.
 """
 
 import logging
-import re
 from typing import Any, Dict, List, Optional
 
 from ..exceptions import A2AAuthenticationError
@@ -40,30 +40,80 @@ class UnifiedAuthProvider:
         self._selected = selected
         self._local_config = local_config
         self._agent_url = agent_url
-        # Cache credentials per binding (indexed by scheme_name)
         self._credentials: Dict[str, AuthCredentials] = {}
         self._retry_attempted = False
+        self._dpop_generator: Optional[Any] = None
+        self._dpop_nonce: Optional[str] = None
+
+        if local_config.get("dpop_enabled"):
+            self._init_dpop(local_config)
+
+    def _init_dpop(self, config: Dict[str, Any]) -> None:
+        from .dpop import DPoPKeyPair, DPoPProofGenerator
+
+        algorithm = config.get("dpop_algorithm", "ES256")
+        rsa_key_size = config.get("dpop_rsa_key_size", 2048)
+        key_pair = DPoPKeyPair.generate(algorithm, rsa_key_size=rsa_key_size)
+        self._dpop_generator = DPoPProofGenerator(key_pair)
 
     # ------------------------------------------------------------------
     # Header generation
     # ------------------------------------------------------------------
 
-    def get_auth_headers(self) -> Dict[str, str]:
-        """Synchronous: obtain auth headers for all bindings (AND merged)."""
+    def get_auth_headers(
+        self,
+        method: Optional[str] = None,
+        url: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Synchronous: obtain auth headers for all bindings (AND merged).
+
+        When DPoP is enabled, ``method`` and ``url`` are used to generate
+        a DPoP proof header and upgrade ``Authorization`` to ``DPoP`` scheme.
+        """
         merged: Dict[str, str] = {}
         for binding in self._selected.bindings:
             creds = self._ensure_credentials(binding)
             headers = binding.protocol.prepare_headers(creds)
             merged.update(headers)
+
+        if self._dpop_generator is not None and method and url:
+            access_token = self._extract_access_token(merged)
+            proof = self._dpop_generator.generate_proof(
+                method=method,
+                url=url,
+                access_token=access_token,
+                nonce=self._dpop_nonce,
+            )
+            merged["DPoP"] = proof
+            if access_token:
+                merged["Authorization"] = f"DPoP {access_token}"
+
         return merged
 
-    async def get_auth_headers_async(self) -> Dict[str, str]:
+    async def get_auth_headers_async(
+        self,
+        method: Optional[str] = None,
+        url: Optional[str] = None,
+    ) -> Dict[str, str]:
         """Asynchronous: obtain auth headers for all bindings (AND merged)."""
         merged: Dict[str, str] = {}
         for binding in self._selected.bindings:
             creds = await self._ensure_credentials_async(binding)
             headers = binding.protocol.prepare_headers(creds)
             merged.update(headers)
+
+        if self._dpop_generator is not None and method and url:
+            access_token = self._extract_access_token(merged)
+            proof = self._dpop_generator.generate_proof(
+                method=method,
+                url=url,
+                access_token=access_token,
+                nonce=self._dpop_nonce,
+            )
+            merged["DPoP"] = proof
+            if access_token:
+                merged["Authorization"] = f"DPoP {access_token}"
+
         return merged
 
     # ------------------------------------------------------------------
@@ -82,8 +132,15 @@ class UnifiedAuthProvider:
             return False
         return True
 
-    def force_refresh(self) -> Dict[str, str]:
-        """Synchronous forced refresh of all binding credentials."""
+    def force_refresh(
+        self,
+        method: Optional[str] = None,
+        url: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Synchronous forced refresh of all binding credentials.
+
+        A fresh DPoP proof (new ``jti``) is generated when DPoP is enabled.
+        """
         self._retry_attempted = True
         merged: Dict[str, str] = {}
         for binding in self._selected.bindings:
@@ -91,9 +148,26 @@ class UnifiedAuthProvider:
             self._credentials[binding.scheme_name] = creds
             headers = binding.protocol.prepare_headers(creds)
             merged.update(headers)
+
+        if self._dpop_generator is not None and method and url:
+            access_token = self._extract_access_token(merged)
+            proof = self._dpop_generator.generate_proof(
+                method=method,
+                url=url,
+                access_token=access_token,
+                nonce=self._dpop_nonce,
+            )
+            merged["DPoP"] = proof
+            if access_token:
+                merged["Authorization"] = f"DPoP {access_token}"
+
         return merged
 
-    async def force_refresh_async(self) -> Dict[str, str]:
+    async def force_refresh_async(
+        self,
+        method: Optional[str] = None,
+        url: Optional[str] = None,
+    ) -> Dict[str, str]:
         """Asynchronous forced refresh of all binding credentials."""
         self._retry_attempted = True
         merged: Dict[str, str] = {}
@@ -102,6 +176,19 @@ class UnifiedAuthProvider:
             self._credentials[binding.scheme_name] = creds
             headers = binding.protocol.prepare_headers(creds)
             merged.update(headers)
+
+        if self._dpop_generator is not None and method and url:
+            access_token = self._extract_access_token(merged)
+            proof = self._dpop_generator.generate_proof(
+                method=method,
+                url=url,
+                access_token=access_token,
+                nonce=self._dpop_nonce,
+            )
+            merged["DPoP"] = proof
+            if access_token:
+                merged["Authorization"] = f"DPoP {access_token}"
+
         return merged
 
     def reset_retry(self) -> None:
@@ -113,12 +200,20 @@ class UnifiedAuthProvider:
     # ------------------------------------------------------------------
 
     def _make_context(self, binding: SchemeBinding) -> AuthContext:
+        cfg = self._local_config
         return AuthContext(
             agent_url=self._agent_url,
             security_scheme=binding.security_scheme,
             required_scopes=binding.scopes,
-            local_config=self._local_config,
+            local_config=cfg,
             current_credentials=self._credentials.get(binding.scheme_name),
+            grant_type=cfg.get("grant_type", "client_credentials"),
+            redirect_uri=cfg.get("redirect_uri"),
+            redirect_handler=cfg.get("redirect_handler"),
+            callback_handler=cfg.get("callback_handler"),
+            dpop_enabled=cfg.get("dpop_enabled", False),
+            dpop_algorithm=cfg.get("dpop_algorithm", "ES256"),
+            dpop_rsa_key_size=cfg.get("dpop_rsa_key_size", 2048),
         )
 
     def _ensure_credentials(self, binding: SchemeBinding) -> AuthCredentials:
@@ -144,7 +239,15 @@ class UnifiedAuthProvider:
     async def _do_authenticate_async(self, binding: SchemeBinding) -> AuthCredentials:
         context = self._make_context(binding)
         protocol = binding.protocol
-        # Use async path if available
         if hasattr(protocol, "authenticate_async"):
             return await protocol.authenticate_async(context)
         return protocol.authenticate(context)
+
+    @staticmethod
+    def _extract_access_token(headers: Dict[str, str]) -> Optional[str]:
+        """Extract the access token from an ``Authorization`` header."""
+        auth = headers.get("Authorization", "")
+        parts = auth.split(None, 1)
+        if len(parts) == 2:
+            return parts[1]
+        return None

@@ -492,3 +492,302 @@ class TestOAuth2ClientCredentialsProtocol:
 
         assert isinstance(creds, OAuthCredentials)
         assert creds.access_token == "async-tok"
+
+
+# ---------------------------------------------------------------------------
+# PKCE generation
+# ---------------------------------------------------------------------------
+
+
+class TestPKCEParameters:
+    def test_code_verifier_length(self):
+        from python_a2a.auth.pkce import PKCEParameters
+
+        pkce = PKCEParameters.generate()
+        assert len(pkce.code_verifier) == 128
+
+    def test_code_verifier_charset(self):
+        import string
+
+        from python_a2a.auth.pkce import PKCEParameters
+
+        allowed = set(string.ascii_letters + string.digits + "-._~")
+        pkce = PKCEParameters.generate()
+        assert all(c in allowed for c in pkce.code_verifier)
+
+    def test_code_challenge_is_s256(self):
+        import base64
+        import hashlib
+
+        from python_a2a.auth.pkce import PKCEParameters
+
+        pkce = PKCEParameters.generate()
+        expected_digest = hashlib.sha256(pkce.code_verifier.encode("ascii")).digest()
+        expected_challenge = base64.urlsafe_b64encode(expected_digest).decode("ascii").rstrip("=")
+        assert pkce.code_challenge == expected_challenge
+
+    def test_state_generation_uniqueness(self):
+        from python_a2a.auth.pkce import generate_state
+
+        states = {generate_state() for _ in range(100)}
+        assert len(states) == 100
+
+
+# ---------------------------------------------------------------------------
+# OAuth2AuthorizationCodeProtocol
+# ---------------------------------------------------------------------------
+
+
+def _make_authcode_context(
+    authorization_url: str = "https://auth.example.com/authorize",
+    token_url: str = "https://auth.example.com/token",
+    redirect_uri: str = "http://localhost:8080/callback",
+    client_id: str = "test-client",
+    client_secret: str = "test-secret",
+    redirect_handler=None,
+    callback_handler=None,
+    scopes: list | None = None,
+) -> "AuthContext":
+    from python_a2a.auth.protocol import AuthContext
+    from python_a2a.models.agent import OAuthFlow, OAuthFlows, SecurityScheme
+
+    scheme = SecurityScheme(
+        type="oauth2",
+        flows=OAuthFlows(
+            authorization_code=OAuthFlow(
+                token_url=token_url,
+                authorization_url=authorization_url,
+            ),
+        ),
+    )
+    return AuthContext(
+        agent_url="https://agent.example.com",
+        security_scheme=scheme,
+        required_scopes=scopes or [],
+        local_config={
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        redirect_uri=redirect_uri,
+        redirect_handler=redirect_handler,
+        callback_handler=callback_handler,
+        grant_type="authorization_code",
+    )
+
+
+class TestOAuth2AuthorizationCodeProtocol:
+    def test_successful_flow(self):
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+        from python_a2a.auth.token_fetcher import SyncTokenFetcher, TokenResponse
+
+        captured_url = []
+
+        def redirect_handler(url: str) -> None:
+            captured_url.append(url)
+
+        def callback_handler():
+            from urllib.parse import parse_qs, urlparse
+
+            parsed = urlparse(captured_url[0])
+            params = parse_qs(parsed.query)
+            return ("authz-code-123", params["state"][0])
+
+        mock_fetcher = MagicMock(spec=SyncTokenFetcher)
+        mock_fetcher.exchange_code.return_value = TokenResponse(
+            access_token="authcode-token",
+            token_type="Bearer",
+            expires_in=3600,
+            scope=None,
+            raw={"access_token": "authcode-token", "token_type": "Bearer", "expires_in": 3600},
+        )
+
+        protocol = OAuth2AuthorizationCodeProtocol(sync_fetcher=mock_fetcher)
+        ctx = _make_authcode_context(
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+        )
+        creds = protocol.authenticate(ctx)
+
+        assert isinstance(creds, OAuthCredentials)
+        assert creds.access_token == "authcode-token"
+        assert len(captured_url) == 1
+        assert "code_challenge" in captured_url[0]
+        assert "code_challenge_method=S256" in captured_url[0]
+        mock_fetcher.exchange_code.assert_called_once()
+
+    def test_missing_redirect_uri_raises(self):
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+
+        ctx = _make_authcode_context(
+            redirect_uri="",
+            redirect_handler=lambda url: None,
+            callback_handler=lambda: ("code", "state"),
+        )
+        ctx.redirect_uri = None
+        protocol = OAuth2AuthorizationCodeProtocol()
+        with pytest.raises(A2AAuthenticationError, match="redirect_uri"):
+            protocol.authenticate(ctx)
+
+    def test_missing_redirect_handler_raises(self):
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+
+        ctx = _make_authcode_context(
+            redirect_handler=None,
+            callback_handler=lambda: ("code", "state"),
+        )
+        protocol = OAuth2AuthorizationCodeProtocol()
+        with pytest.raises(A2AAuthenticationError, match="redirect_handler"):
+            protocol.authenticate(ctx)
+
+    def test_missing_callback_handler_raises(self):
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+
+        ctx = _make_authcode_context(
+            redirect_handler=lambda url: None,
+            callback_handler=None,
+        )
+        protocol = OAuth2AuthorizationCodeProtocol()
+        with pytest.raises(A2AAuthenticationError, match="callback_handler"):
+            protocol.authenticate(ctx)
+
+    def test_state_mismatch_raises(self):
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+
+        ctx = _make_authcode_context(
+            redirect_handler=lambda url: None,
+            callback_handler=lambda: ("code", "WRONG-STATE"),
+        )
+        protocol = OAuth2AuthorizationCodeProtocol()
+        with pytest.raises(A2AAuthenticationError, match="state mismatch"):
+            protocol.authenticate(ctx)
+
+    def test_missing_authorization_code_flow_raises(self):
+        from python_a2a.auth.protocol import AuthContext
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+        from python_a2a.models.agent import OAuthFlow, OAuthFlows, SecurityScheme
+
+        scheme = SecurityScheme(
+            type="oauth2",
+            flows=OAuthFlows(
+                client_credentials=OAuthFlow(token_url="https://as.example.com/token"),
+            ),
+        )
+        ctx = AuthContext(
+            agent_url="https://agent.example.com",
+            security_scheme=scheme,
+            local_config={"client_id": "c", "client_secret": "s"},
+            redirect_uri="http://localhost/cb",
+            redirect_handler=lambda url: None,
+            callback_handler=lambda: ("code", "state"),
+            grant_type="authorization_code",
+        )
+        protocol = OAuth2AuthorizationCodeProtocol()
+        with pytest.raises(A2AAuthenticationError, match="authorization_code flow"):
+            protocol.authenticate(ctx)
+
+    def test_missing_authorization_url_raises(self):
+        from python_a2a.auth.protocol import AuthContext
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+        from python_a2a.models.agent import OAuthFlow, OAuthFlows, SecurityScheme
+
+        scheme = SecurityScheme(
+            type="oauth2",
+            flows=OAuthFlows(
+                authorization_code=OAuthFlow(
+                    token_url="https://as.example.com/token",
+                    authorization_url=None,
+                ),
+            ),
+        )
+        ctx = AuthContext(
+            agent_url="https://agent.example.com",
+            security_scheme=scheme,
+            local_config={"client_id": "c", "client_secret": "s"},
+            redirect_uri="http://localhost/cb",
+            redirect_handler=lambda url: None,
+            callback_handler=lambda: ("code", "state"),
+            grant_type="authorization_code",
+        )
+        protocol = OAuth2AuthorizationCodeProtocol()
+        with pytest.raises(A2AAuthenticationError, match="authorization_url"):
+            protocol.authenticate(ctx)
+
+    def test_redirect_uri_passed_to_token_exchange(self):
+        """redirect_uri in the token exchange MUST match the authorize request."""
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+        from python_a2a.auth.token_fetcher import SyncTokenFetcher, TokenResponse
+
+        captured_url = []
+        expected_redirect_uri = "http://localhost:9999/callback"
+
+        def redirect_handler(url: str) -> None:
+            captured_url.append(url)
+
+        def callback_handler():
+            from urllib.parse import parse_qs, urlparse
+
+            parsed = urlparse(captured_url[0])
+            params = parse_qs(parsed.query)
+            return ("the-code", params["state"][0])
+
+        mock_fetcher = MagicMock(spec=SyncTokenFetcher)
+        mock_fetcher.exchange_code.return_value = TokenResponse(
+            access_token="tok",
+            token_type="Bearer",
+            expires_in=3600,
+            scope=None,
+            raw={"access_token": "tok"},
+        )
+
+        protocol = OAuth2AuthorizationCodeProtocol(sync_fetcher=mock_fetcher)
+        ctx = _make_authcode_context(
+            redirect_uri=expected_redirect_uri,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+        )
+        protocol.authenticate(ctx)
+
+        call_kwargs = mock_fetcher.exchange_code.call_args[1]
+        assert call_kwargs["redirect_uri"] == expected_redirect_uri
+        assert call_kwargs["code"] == "the-code"
+        assert "code_verifier" in call_kwargs
+
+    def test_protocol_id(self):
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+
+        assert OAuth2AuthorizationCodeProtocol().protocol_id == "oauth2"
+
+    def test_scopes_included_in_authorize_url(self):
+        from python_a2a.auth.protocols.oauth2 import OAuth2AuthorizationCodeProtocol
+        from python_a2a.auth.token_fetcher import SyncTokenFetcher, TokenResponse
+
+        captured_url = []
+
+        def redirect_handler(url: str) -> None:
+            captured_url.append(url)
+
+        def callback_handler():
+            from urllib.parse import parse_qs, urlparse
+
+            parsed = urlparse(captured_url[0])
+            params = parse_qs(parsed.query)
+            return ("code", params["state"][0])
+
+        mock_fetcher = MagicMock(spec=SyncTokenFetcher)
+        mock_fetcher.exchange_code.return_value = TokenResponse(
+            access_token="tok",
+            token_type="Bearer",
+            expires_in=3600,
+            scope=None,
+            raw={"access_token": "tok"},
+        )
+
+        protocol = OAuth2AuthorizationCodeProtocol(sync_fetcher=mock_fetcher)
+        ctx = _make_authcode_context(
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+            scopes=["read", "write"],
+        )
+        protocol.authenticate(ctx)
+
+        assert "scope=read+write" in captured_url[0]

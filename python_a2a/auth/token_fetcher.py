@@ -108,6 +108,36 @@ def _parse_token_response(
     )
 
 
+def _build_authcode_token_request_params(
+    client_id: str,
+    client_secret: str,
+    code: str,
+    redirect_uri: str,
+    code_verifier: str,
+    client_auth_method: str,
+) -> tuple:
+    """Build (data dict, headers dict) for an authorization_code token exchange."""
+    data: Dict[str, str] = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+    }
+
+    headers: Dict[str, str] = {}
+
+    if client_auth_method == CLIENT_SECRET_BASIC:
+        encoded = base64.b64encode(
+            f"{client_id}:{client_secret}".encode()
+        ).decode()
+        headers["Authorization"] = f"Basic {encoded}"
+    else:
+        data["client_id"] = client_id
+        data["client_secret"] = client_secret
+
+    return data, headers
+
+
 class SyncTokenFetcher:
     """Synchronous token fetcher using ``requests``."""
 
@@ -143,6 +173,37 @@ class SyncTokenFetcher:
             logger.exception("Token request to %s failed", token_url)
             raise A2AAuthenticationError(
                 f"Token request to {token_url} failed"
+            )
+
+        return _parse_token_response(response.status_code, body)
+
+    def exchange_code(
+        self,
+        token_url: str,
+        client_id: str,
+        client_secret: str,
+        code: str,
+        redirect_uri: str,
+        code_verifier: str,
+        client_auth_method: str = DEFAULT_CLIENT_AUTH_METHOD,
+        timeout: float = 30.0,
+    ) -> TokenResponse:
+        """Exchange an authorization code for tokens (sync)."""
+        import requests
+
+        data, extra_headers = _build_authcode_token_request_params(
+            client_id, client_secret, code, redirect_uri,
+            code_verifier, client_auth_method,
+        )
+        try:
+            response = requests.post(
+                token_url, data=data, headers=extra_headers, timeout=timeout,
+            )
+            body = response.json()
+        except requests.RequestException:
+            logger.exception("Auth-code token exchange to %s failed", token_url)
+            raise A2AAuthenticationError(
+                f"Auth-code token exchange to {token_url} failed"
             )
 
         return _parse_token_response(response.status_code, body)
@@ -185,6 +246,42 @@ class AsyncTokenFetcher:
             logger.exception("Async token request to %s failed", token_url)
             raise A2AAuthenticationError(
                 f"Token request to {token_url} failed"
+            )
+
+        return _parse_token_response(status_code, body)
+
+    async def exchange_code(
+        self,
+        token_url: str,
+        client_id: str,
+        client_secret: str,
+        code: str,
+        redirect_uri: str,
+        code_verifier: str,
+        client_auth_method: str = DEFAULT_CLIENT_AUTH_METHOD,
+        timeout: float = 30.0,
+    ) -> TokenResponse:
+        """Exchange an authorization code for tokens (async)."""
+        import aiohttp
+
+        data, extra_headers = _build_authcode_token_request_params(
+            client_id, client_secret, code, redirect_uri,
+            code_verifier, client_auth_method,
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    token_url,
+                    data=data,
+                    headers=extra_headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as response:
+                    body = await response.json(content_type=None)
+                    status_code = response.status
+        except aiohttp.ClientError:
+            logger.exception("Async auth-code token exchange to %s failed", token_url)
+            raise A2AAuthenticationError(
+                f"Auth-code token exchange to {token_url} failed"
             )
 
         return _parse_token_response(status_code, body)
