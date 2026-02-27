@@ -103,6 +103,15 @@ Tools to enhance your development workflow:
 | [Interactive Docs](developer_tools/interactive_docs.py) | Generate API documentation | Creating documentation for your agents |
 | [Testing Agents](developer_tools/testing_agents.py) | Test A2A agents | Writing tests for agents |
 
+### Authentication E2E
+
+使用样例与可复用 OAuth 测试服务器：
+
+| Example | Description | Key Learning |
+|---------|-------------|--------------|
+| [OAuth Test Server](auth/oauth_test_server.py) | 独立可复用的本地 OAuth+A2A 测试服务器 | 本地联调与示例共用 |
+| [Auth E2E 示例](auth/e2e_oauth_matrix_example.py) | 多鉴权方式端到端使用示例：4 类自动化 + 1 类交互式（授权码需浏览器登录） | 统一鉴权各方式的实际用法 |
+
 ## 🔍 Finding the Right Example for Your Needs
 
 ### Based on Your Role
@@ -137,6 +146,20 @@ Most examples can be run with:
 ```bash
 python example_name.py
 ```
+
+Auth E2E examples:
+
+```bash
+# 启动可复用 OAuth 服务器
+python auth/oauth_test_server.py --port 8008
+
+# 运行认证端到端示例（含 4 类自动化 + 1 类交互式授权码，会打开浏览器）
+python auth/e2e_oauth_matrix_example.py
+```
+
+注意事项：
+- `auth/e2e_oauth_matrix_example.py` 固定使用回调端口 `127.0.0.1:3031`，若端口被占用会直接提示启动失败。
+- 浏览器自动拉起在 macOS 使用 `open` 回退；其他平台请手动复制终端输出的授权链接打开。
 
 Some examples require API keys or additional setup. Check the comments at the top of each file for specific requirements and instructions.
 
